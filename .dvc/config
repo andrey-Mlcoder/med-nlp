@@ -1,0 +1,7 @@
+[core]
+    remote = yandex
+['remote "yandex"']
+    url = s3://it-backet-ml-coder
+    endpointurl = https://storage.yandexcloud.net
+    connect_timeout = 120
+    read_timeout = 600
