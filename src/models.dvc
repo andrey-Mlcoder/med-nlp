@@ -1,6 +1,0 @@
-outs:
-- md5: deb531af9821d74b2d358ac88dc26191.dir
-  size: 889573417
-  nfiles: 10
-  hash: md5
-  path: models
