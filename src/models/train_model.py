@@ -2,13 +2,18 @@
 Скрипт обучения модели.
 Режим выбирается переменной MODE в начале файла
 """
+import sys
+from pathlib import Path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
 import random
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim.AdamW as AdamW
-import torch.optim.lr_scheduler.ReduceLROnPlateau as ReduceLROnPlateau
-from pathlib import Path
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
 from torch.utils.data import DataLoader, Subset, ConcatDataset
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
@@ -16,8 +21,8 @@ from clearml import Task
 
 from src.data.make_dataset import FUSegBaseline, DFUC
 from src.data.transforms import train_tf, val_tf
-from .loss import DiceFocalLoss
-from .config import get_model
+from src.models.loss import DiceFocalLoss
+from src.models.config import get_model
 
 # ==================== НАСТРОЙКИ (менять здесь) ====================
 MODE = "baseline"           # "baseline" (только FuSeg) или "extended" (FuSeg + DFUC)
@@ -108,7 +113,10 @@ def main():
     # Цикл обучения
     best_dice = 0.0
     patience_counter = 0
-    best_model_path = f"{MODE}_{MODEL_NAME}_best.pth"
+    WEIGHTS_DIR = PROJECT_ROOT / 'src' / 'weights'
+    WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)  # создаём папку, если её нет
+
+    best_model_path = WEIGHTS_DIR / f"{MODE}_{MODEL_NAME}_best.pth"
     
     for epoch in range(1, MAX_EPOCHS + 1):
         # train

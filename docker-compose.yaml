@@ -1,7 +1,7 @@
 services: 
   app:
     build: ./app/
-    image: ml-api:1.0
+    #image: ml-api:1.0
     container_name: ml-api
     restart: unless-stopped
     ports:
@@ -11,6 +11,7 @@ services:
     - ./app/.env
     volumes:
       - ./app:/app
+      - ./uploads:/app/uploads 
     depends_on:
       db:
         condition: service_started
@@ -26,16 +27,18 @@ services:
       start_period: 20s
   ml_worker:
     build: ./ml_worker/
-    image: ml-api-ml-worker:latest
-    container_name: ml-worker
+    #image: ml-api-ml-worker:latest
     restart: unless-stopped
     env_file:
       - ./ml_worker/.env
     volumes:
+      - ./src/weights:/app/weights:ro
       - ./ml_worker:/app
       - ./app:/app_app
+      - ./uploads:/app/uploads  
     environment:
       - PYTHONPATH=/app_app:/app
+      - MODEL_WEIGHTS_PATH=/app/weights/update_model_dataset_mit.pth
     depends_on:
       db:
         condition: service_started
@@ -43,6 +46,8 @@ services:
         condition: service_healthy
     networks:
       - ml-network
+    deploy:
+      replicas: 3
   web:
     image: nginx:trixie-perl
     container_name: ml-nginx
