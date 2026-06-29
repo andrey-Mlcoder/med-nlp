@@ -1,5 +1,8 @@
-from sqlmodel import SQLModel, Session, create_engine 
+from sqlmodel import SQLModel, Session, create_engine, select 
 from .config import get_settings
+from auth.hash_password import HashPassword
+from models.user import User, UserRole
+from models.patient_doctor import PatientDoctorAssignment
 
 def get_database_engine():
     """
@@ -27,7 +30,9 @@ def get_session():
         yield session
         
 def init_db(drop_all: bool = False) -> None:
-    
+    """
+    Инициализация базы данных: создание таблиц и тестовых пользователей.
+    """
     try:
         engine = get_database_engine()
         if drop_all:
@@ -36,22 +41,65 @@ def init_db(drop_all: bool = False) -> None:
         SQLModel.metadata.create_all(engine)
 
         with Session(engine) as session:
-            from services.crud.model import get_all_models
-            models = get_all_models(session)
-            if not models:
-                from services.crud.model import create_model
-                create_model(
-                    name="Default Model",
-                    model_type="ocr",
-                    session=session)
+            # Проверяем, есть ли уже пользователи
+            existing_users = session.exec(select(User)).all()
+            if not existing_users:
+                hash_pwd = HashPassword()
+
+                # 1. Создаём администратора
+                admin = User(
+                    email="admin@example.com",
+                    hashed_password=hash_pwd.create_hash("admin123"),
+                    full_name="Test Admin",
+                    role=UserRole.ADMIN,
+                    is_active=True
+                )
+                session.add(admin)
+
+                # 2. Создаём врача
+                doctor = User(
+                    email="doctor@example.com",
+                    hashed_password=hash_pwd.create_hash("doctor123"),
+                    full_name="Test Doctor",
+                    role=UserRole.DOCTOR,
+                    is_active=True,
+                    specialization="Wound Care Specialist"
+                )
+                session.add(doctor)
+
+                # 3. Создаём пациента
+                patient = User(
+                    email="patient@example.com",
+                    hashed_password=hash_pwd.create_hash("patient123"),
+                    full_name="Test Patient",
+                    role=UserRole.PATIENT,
+                    is_active=True,
+                    phone="+7 999 123-45-67"
+                )
+                session.add(patient)
+
                 session.commit()
-                print("Created default model")
+                session.refresh(admin)
+                session.refresh(doctor)
+                session.refresh(patient)
 
-            from services.crud.admin import create_test_admin
-            create_test_admin(session)
+                # 4. Назначаем врача пациенту
+                assignment = PatientDoctorAssignment(
+                    patient_id=patient.id,
+                    doctor_id=doctor.id,
+                    is_active=True
+                )
+                session.add(assignment)
+                session.commit()
 
-            print("TEST ADMIN CREATED SUCCESSFULLY")
+                print("✅ Тестовые пользователи созданы:")
+                print(f"   Админ: admin@example.com / admin123")
+                print(f"   Врач:  doctor@example.com / doctor123")
+                print(f"   Пациент: patient@example.com / patient123")
+            else:
+                print("ℹ️ Пользователи уже существуют, пропускаем создание.")
 
-    
     except Exception as e:
+        print(f"❌ Ошибка инициализации БД: {e}")
         raise
+        

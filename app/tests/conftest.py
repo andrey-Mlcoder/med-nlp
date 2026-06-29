@@ -5,24 +5,31 @@ from sqlalchemy.pool import StaticPool
 from api import app
 from database.database import get_session
 from auth.authenticate import authenticate
-from services.rm.rm import publish_ml_task
-from models.user import User
-from models.balance import Balance
+from services.rm.rm import publish_wound_task
+from models.user import User, UserRole
+from models.patient_doctor import PatientDoctorAssignment
+from auth.hash_password import HashPassword
 from PIL import Image
 import io
+import os
+import tempfile
 
-TEST_EMAIL = "test@test.com"
-TEST_PASSWORD = "123456"
+TEST_EMAIL = "test@example.com"
+TEST_PASSWORD = "test123"
+TEST_DOCTOR_EMAIL = "doctor@example.com"
+TEST_DOCTOR_PASSWORD = "doc123"
+TEST_ADMIN_EMAIL = "admin@example.com"
+TEST_ADMIN_PASSWORD = "admin123"
 
 
-def mock_publish_ml_task(task, session):
-    """Заглушка для RabbitMQ"""
-    print(f"Mock publish task: {task.task_id}")
+def mock_publish_wound_task(image_id, patient_id, image_path, task_id=None):
+    """Заглушка для публикации задачи в очередь."""
+    print(f"Mock publish task for image {image_id}")
     pass
 
 
 @pytest.fixture(name="session")
-def session():
+def session_fixture():
     """Тестовая сессия БД (SQLite)"""
     engine = create_engine(
         "sqlite:///testing.db",
@@ -43,12 +50,9 @@ def client_fixture(session: Session):
     def get_session_override():
         return session
 
-    def authenticate_override():
-        return TEST_EMAIL
-
     app.dependency_overrides[get_session] = get_session_override
-    app.dependency_overrides[authenticate] = authenticate_override
-    app.dependency_overrides[publish_ml_task] = mock_publish_ml_task
+
+    app.dependency_overrides[publish_wound_task] = mock_publish_wound_task
 
     client = TestClient(app)
     yield client
@@ -56,48 +60,26 @@ def client_fixture(session: Session):
 
 
 @pytest.fixture
-def create_test_model(session: Session):
-    """Создает тестовую ML модель"""
-    from models.model import ML_model
-
-    model = ML_model(
-        name="EasyOcr",
-        model_type="ocr",
-        languages='["ru", "en"]'
-    )
-    session.add(model)
-    session.commit()
-    session.refresh(model)
-    return model
-
-@pytest.fixture
 def test_image():
-    """Создает тестовое изображение"""
+    """Создает тестовое изображение (PNG)."""
     img = Image.new('RGB', (200, 100), color='white')
-    from PIL import ImageDraw
-    draw = ImageDraw.Draw(img)
-    draw.text((10, 40), "Test Text 123", fill='black')
     img_bytes = io.BytesIO()
-    img.save(img_bytes, format='JPEG')
+    img.save(img_bytes, format='PNG')
     img_bytes.seek(0)
     return img_bytes
 
 
 @pytest.fixture
-def create_test_user(session: Session, create_test_model):
-    """Создает тестового пользователя напрямую в БД"""
-    from auth.hash_password import HashPassword
-    hash_password = HashPassword()
-
+def create_test_patient(session: Session):
+    """Создает тестового пациента."""
+    hash_pwd = HashPassword()
     user = User(
-        username="testuser",
         email=TEST_EMAIL,
-        password=hash_password.create_hash(TEST_PASSWORD)
+        hashed_password=hash_pwd.create_hash(TEST_PASSWORD),
+        full_name="Test Patient",
+        role=UserRole.PATIENT,
+        is_active=True
     )
-
-    balance = Balance(amount=100.0)
-    user.balance = balance
-
     session.add(user)
     session.commit()
     session.refresh(user)
@@ -105,14 +87,68 @@ def create_test_user(session: Session, create_test_model):
 
 
 @pytest.fixture
-def auth_headers(client: TestClient, create_test_user):
-    """Возвращает заголовки с токеном для тестового пользователя"""
+def create_test_doctor(session: Session):
+    """Создает тестового врача."""
+    hash_pwd = HashPassword()
+    user = User(
+        email=TEST_DOCTOR_EMAIL,
+        hashed_password=hash_pwd.create_hash(TEST_DOCTOR_PASSWORD),
+        full_name="Test Doctor",
+        role=UserRole.DOCTOR,
+        is_active=True,
+        specialization="Wound Care"
+    )
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
+
+
+@pytest.fixture
+def create_test_admin(session: Session):
+    """Создает тестового администратора."""
+    hash_pwd = HashPassword()
+    user = User(
+        email=TEST_ADMIN_EMAIL,
+        hashed_password=hash_pwd.create_hash(TEST_ADMIN_PASSWORD),
+        full_name="Test Admin",
+        role=UserRole.ADMIN,
+        is_active=True
+    )
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
+
+
+@pytest.fixture
+def auth_headers_patient(client: TestClient, create_test_patient):
+    """Возвращает заголовки с токеном для пациента."""
     response = client.post(
         "/api/users/signin",
-        data={
-            "username": TEST_EMAIL,
-            "password": TEST_PASSWORD
-        }
+        data={"username": TEST_EMAIL, "password": TEST_PASSWORD}
+    )
+    token = response.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def auth_headers_doctor(client: TestClient, create_test_doctor):
+    """Возвращает заголовки с токеном для врача."""
+    response = client.post(
+        "/api/users/signin",
+        data={"username": TEST_DOCTOR_EMAIL, "password": TEST_DOCTOR_PASSWORD}
+    )
+    token = response.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def auth_headers_admin(client: TestClient, create_test_admin):
+    """Возвращает заголовки с токеном для администратора."""
+    response = client.post(
+        "/api/users/signin",
+        data={"username": TEST_ADMIN_EMAIL, "password": TEST_ADMIN_PASSWORD}
     )
     token = response.json()["access_token"]
     return {"Authorization": f"Bearer {token}"}

@@ -28,7 +28,7 @@ async def login_for_access_token(response: Response, form_data: OAuth2PasswordRe
     if user_exist is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User does not exist")
 
-    if hash_password.verify_hash(form_data.password, user_exist.password):
+    if hash_password.verify_hash(form_data.password, user_exist.hashed_password):
         access_token = create_access_token(user_exist.email)
         response.set_cookie(
             key=settings.COOKIE_NAME,

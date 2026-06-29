@@ -2,10 +2,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routes.health_check import health_check_router
 from routes.users import users_router
-from routes.balance import balance_router
 from routes.auth import auth_router
 from routes.predict import predict_router
 from routes.admin import admin_router
+from routes.alerts import alerts_router
 from database.database import init_db
 from database.config import get_settings
 import uvicorn
@@ -40,12 +40,12 @@ def create_application() -> FastAPI:
     )
 
     # Register routes
-    app.include_router(health_check_router, prefix='api/health', tags=['Health'])
+    app.include_router(health_check_router, prefix='/health', tags=['Health'])
     app.include_router(users_router, prefix='/api/users', tags=['Users'])
     app.include_router(auth_router, prefix='/api/auth', tags=['Auth'])
-    app.include_router(balance_router, prefix='/api/balance', tags=['Balance'])
     app.include_router(predict_router, prefix='/api/predict', tags=['Predict'])
     app.include_router(admin_router, prefix='/api/admin', tags=['Admin'])
+    app.include_router(alerts_router, prefix='/api/alerts', tags=['Alerts'])
 
     return app
 
@@ -55,7 +55,7 @@ app = create_application()
 def on_startup():
     try:
         logger.info("Initializing database...")
-        init_db(drop_all=True)
+        init_db(drop_all=False)
         logger.info("Application startup completed successfully")
     except Exception as e:
         logger.error(f"Startup failed: {str(e)}")

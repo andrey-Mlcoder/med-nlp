@@ -2,10 +2,10 @@ import gradio as gr
 import requests
 from PIL import Image
 import io
+import os
 
-# Конфигурация
-API_BASE_URL = "http://localhost:8080/api"
-
+# Конфигурация — адрес API (в Docker: http://app:8080/api)
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8080/api")
 
 def make_request(
         method: str,
@@ -16,7 +16,7 @@ def make_request(
         files: dict = None,
         params: dict = None
 ) -> tuple[bool, any]:
-    """Универсальная функция для API запросов"""
+    """Универсальная функция для API запросов."""
     headers = {}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -29,48 +29,30 @@ def make_request(
         elif method.upper() == "POST":
             if files:
                 response = requests.post(
-                    url,
-                    headers=headers,
-                    params=params,
-                    files=files,
-                    timeout=30
+                    url, headers=headers, params=params, files=files, timeout=30
                 )
             elif json_data:
                 headers["Content-Type"] = "application/json"
                 response = requests.post(
-                    url,
-                    headers=headers,
-                    params=params,
-                    json=json_data,
-                    timeout=10
+                    url, headers=headers, params=params, json=json_data, timeout=10
                 )
             elif form_data:
                 response = requests.post(
-                    url,
-                    headers=headers,
-                    params=params,
-                    data=form_data,
-                    timeout=10
+                    url, headers=headers, params=params, data=form_data, timeout=10
                 )
             else:
-                response = requests.post(
-                    url,
-                    headers=headers,
-                    params=params,
-                    timeout=10
-                )
+                response = requests.post(url, headers=headers, params=params, timeout=10)
         elif method.upper() == "DELETE":
-            response = requests.delete(
-                url,
-                headers=headers,
-                params=params,
-                timeout=10
-            )
+            response = requests.delete(url, headers=headers, params=params, timeout=10)
+        elif method.upper() == "PATCH":
+            if json_data:
+                headers["Content-Type"] = "application/json"
+                response = requests.patch(url, headers=headers, params=params, json=json_data, timeout=10)
         else:
             return False, f"Unsupported method: {method}"
 
         if response.status_code in [200, 201, 204]:
-            return True, response.json()
+            return True, response.json() if response.text else {}
         else:
             try:
                 error_data = response.json()
@@ -84,20 +66,14 @@ def make_request(
         return False, str(e)
 
 
-# Функции пользователей
-
+# ===================== Аутентификация =====================
 def login(username: str, password: str, session_state):
-    """Авторизация через /api/users/signin"""
-
+    """Авторизация через /api/users/signin (OAuth2)."""
     if not username or not password:
         return "❌ Введите email и пароль", session_state, gr.update(visible=False)
 
-    login_data = {
-        "username": username,
-        "password": password
-    }
-
-    success, result = make_request("POST", "/users/signin", form_data=login_data)
+    form_data = {"username": username, "password": password}
+    success, result = make_request("POST", "/users/signin", form_data=form_data)
 
     if success:
         token = result.get("access_token")
@@ -107,29 +83,25 @@ def login(username: str, password: str, session_state):
 
             # Получаем профиль
             prof_success, profile = make_request("GET", "/users/profile", token=token)
-
             if prof_success:
                 session_state["profile"] = profile
-
-                # Проверяем, является ли админом
-                admin_success, admin_check = make_request("GET", "/admin/check", token=token)
-                if admin_success:
-                    session_state["is_admin"] = admin_check.get("is_admin", False)
-                return f"✅ Добро пожаловать, {profile.get('username', username)}!", session_state, gr.update(
-                    visible=True)
+                role = profile.get("role", "patient")
+                session_state["role"] = role
+                return f"✅ Добро пожаловать, {profile.get('full_name', username)}! Роль: {role}", session_state, gr.update(visible=True)
             return "✅ Вход выполнен!", session_state, gr.update(visible=True)
     return f"❌ Ошибка: {result}", session_state, gr.update(visible=False)
 
 
-def register(username: str, email: str, password: str, session_state):
-    """Регистрация через /api/users/signup"""
-    if not username or not email or not password:
-        return "❌ Заполните все поля", session_state
+def register(email: str, full_name: str, password: str, phone: str, session_state):
+    """Регистрация нового пациента через /api/users/signup."""
+    if not email or not full_name or not password:
+        return "❌ Заполните все обязательные поля", session_state
 
     user_data = {
-        "username": username,
         "email": email,
-        "password": password
+        "full_name": full_name,
+        "password": password,
+        "phone": phone or None
     }
 
     success, result = make_request("POST", "/users/signup", json_data=user_data)
@@ -141,351 +113,353 @@ def register(username: str, email: str, password: str, session_state):
 
 
 def logout(session_state):
-    """Выход из системы"""
+    """Выход из системы."""
     session_state.clear()
     return "👋 Вы вышли из системы", session_state, gr.update(visible=False)
 
 
-def get_balance(session_state):
-    """Получение баланса через /api/balance/current_balance"""
+# ===================== Пациентские функции =====================
+def upload_wound_image(image, notes, session_state):
+    """Загрузка изображения раны."""
     if not session_state.get("token"):
-        return "❌ Сначала войдите в систему"
-
-    success, result = make_request("GET", "/balance/current_balance", token=session_state["token"])
-
-    if success:
-        amount = result.get('amount', '0')
-        return f"💰 Баланс: {amount} кредитов"
-    else:
-        return f"❌ Ошибка: {result}"
-
-
-def topup_balance(amount: float, session_state):
-    """Пополнение баланса через /api/balance/add_balance"""
-    if not session_state.get("token"):
-        return "❌ Сначала войдите в систему"
-
-    if amount <= 0:
-        return "❌ Сумма должна быть положительной"
-
-    success, result = make_request("POST", "/balance/add_balance", token=session_state["token"],
-                                   params={"amount": amount})
-
-    if success:
-        new_balance = result.get('new_balance', '0')
-        return f"✅ Пополнено! Новый баланс: {new_balance} кредитов"
-    else:
-        return f"❌ Ошибка: {result}"
-
-
-def predict_image(image, description: str, session_state):
-    """Отправка изображения через /api/predict/upload_image"""
-    if not session_state.get("token"):
-        return "❌ Сначала войдите в систему", None
+        return "❌ Сначала войдите", None
 
     if image is None:
         return "❌ Выберите изображение", None
 
-    # Конвертируем PIL Image в bytes
     img_bytes = io.BytesIO()
     if image.mode != 'RGB':
         image = image.convert('RGB')
-
     image.save(img_bytes, format='JPEG', quality=95)
     img_bytes = img_bytes.getvalue()
 
-    # Создаем файл для отправки
-    files = {
-        'file': ('image.jpg', img_bytes, 'image/jpeg')
-    }
+    files = {'file': ('image.jpg', img_bytes, 'image/jpeg')}
+    params = {'notes': notes or ""}
 
-    params = {
-        'cost': '10.0',
-        'description': description or "Запрос из Gradio"
-    }
-
-    success, result = make_request("POST", "/predict/upload_image", token=session_state["token"],
+    success, result = make_request("POST", "/predict/upload", token=session_state["token"],
                                    files=files, params=params)
 
     if success:
-        task_id = result.get("task_id")
-        return f"✅ Задача создана! ID: {task_id}", task_id
+        image_id = result.get("image_id")
+        return f"✅ Изображение загружено! ID: {image_id}", image_id
     else:
         return f"❌ Ошибка: {result}", None
 
 
-def get_task_result(task_id: str, session_state):
-    """Получение результата через /api/predict/get-result/{task_id}"""
+def get_result(image_id, session_state):
+    """Получение результата анализа."""
     if not session_state.get("token"):
-        return "❌ Сначала войдите в систему"
+        return "❌ Сначала войдите", None
 
-    if not task_id:
-        return "❌ Введите ID задачи"
+    if not image_id:
+        return "❌ Введите ID изображения", None
 
-    success, result = make_request("GET", f"/predict/get-result/{task_id}", token=session_state["token"])
+    success, result = make_request("GET", f"/predict/result/{image_id}",
+                                   token=session_state["token"])
 
     if success:
-        status = result.get("status", "unknown")
-        prediction = result.get("prediction", "")
-
-        if status == "completed":
-            return f"✅ РЕЗУЛЬТАТ:\n{prediction}"
-        elif status == "failed":
-            return f"❌ Задача не выполнена"
-        elif status == "processing":
-            return f"⏳ Задача в обработке..."
-        else:
-            return f"📊 Статус: {status}"
+        output = f"📊 Результат для изображения {image_id}\n"
+        output += "=" * 40 + "\n"
+        output += f"📅 Дата загрузки: {result.get('upload_date', 'N/A')}\n"
+        output += f"🟢 Площадь раны: {result.get('area_percent', 0)*100:.2f}%\n"
+        if result.get('area_change') is not None:
+            change = result.get('area_change')
+            sign = "+" if change > 0 else ""
+            output += f"📈 Изменение: {sign}{change:.1f}%\n"
+        output += f"🚨 Алерт: {'Да' if result.get('alert') else 'Нет'}\n"
+        if result.get('analysis'):
+            analysis = result['analysis']
+            output += f"🧠 Модель: {analysis.get('model_version', 'N/A')}\n"
+            output += f"⏱️ Время обработки: {analysis.get('processing_time_ms', 0)} мс\n"
+            if analysis.get('dice_score') is not None:
+                output += f"🎯 Dice: {analysis['dice_score']:.4f}\n"
+            if analysis.get('doctor_notes'):
+                output += f"📝 Заметки врача: {analysis['doctor_notes']}\n"
+        return output
     else:
         return f"❌ Ошибка: {result}"
 
 
-def get_history(session_state):
-    """Получение истории через /api/users/history"""
+def get_overlay(image_id, color, thickness, show_area, session_state):
+    """Получение оверлея с контуром маски."""
     if not session_state.get("token"):
-        return "❌ Сначала войдите в систему"
+        return None, "❌ Сначала войдите"
+    if not image_id:
+        return None, "❌ Введите ID изображения"
+
+    params = {
+        "color": color,
+        "thickness": thickness,
+        "show_area": str(show_area).lower()
+    }
+    headers = {"Authorization": f"Bearer {session_state['token']}"}
+    url = f"{API_BASE_URL}/predict/overlay/{image_id}"
+
+    try:
+        resp = requests.get(url, headers=headers, params=params, stream=True, timeout=10)
+        if resp.status_code == 200:
+            return Image.open(io.BytesIO(resp.content)), "✅ Оверлей получен"
+        else:
+            return None, f"❌ Ошибка: {resp.text}"
+    except Exception as e:
+        return None, f"❌ Ошибка: {str(e)}"
+
+
+def get_patient_history(session_state):
+    """История загрузок пациента."""
+    if not session_state.get("token"):
+        return "❌ Сначала войдите"
 
     success, result = make_request("GET", "/users/history", token=session_state["token"])
-
     if success:
         if not result:
-            return "📭 История пуста"
-
-        output = "📊 ИСТОРИЯ ОПЕРАЦИЙ:\n"
-        output += "=" * 60 + "\n"
-        for item in result[:15]:
-            created_at = item.get('created_at', 'N/A')[:16] if item.get('created_at') else 'N/A'
-            output += f"📅 {created_at}\n"
-            output += f"📝 {item.get('description', 'N/A')}\n"
-            output += f"💰 Стоимость: {item.get('cost', 0)} кредитов\n"
-            output += f"🆔 Задача: {item.get('task_id', 'N/A')}\n"
-            output += "-" * 40 + "\n"
-
+            return "📭 Нет загруженных изображений"
+        output = "📋 ИСТОРИЯ ЗАГРУЗОК:\n"
+        output += "=" * 50 + "\n"
+        for item in result[:20]:
+            output += f"🆔 {item['id']} | {item['upload_date'][:16]}\n"
+            area = item.get('area_percent') or 0
+            output += f"   Площадь: {area*100:.2f}% | "
+            output += f"Изменение: {item.get('change', 'N/A')}\n"
+            output += "-" * 30 + "\n"
         return output
     else:
         return f"❌ Ошибка: {result}"
 
 
 def get_profile(session_state):
-    """Получение профиля через /api/users/profile"""
+    """Получение профиля пользователя через /api/users/profile."""
     if not session_state.get("token"):
-        return "❌ Сначала войдите в систему"
+        return "❌ Сначала войдите"
 
     success, result = make_request("GET", "/users/profile", token=session_state["token"])
-
     if success:
         output = f"👤 ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ:\n"
         output += "=" * 40 + "\n"
         output += f"📧 Email: {result.get('email', 'N/A')}\n"
-        output += f"👤 Имя: {result.get('username', 'N/A')}\n"
-        output += f"💰 Баланс: {result.get('balance', '0')} кредитов\n"
-        output += f"🆔 ID: {result.get('user_id', 'N/A')}\n"
+        output += f"👤 Имя: {result.get('full_name', 'N/A')}\n"
+        output += f"🆔 ID: {result.get('id', 'N/A')}\n"
+        output += f"📞 Телефон: {result.get('phone', 'N/A')}\n"
+        output += f"🎂 Дата рождения: {result.get('date_of_birth', 'N/A')}\n"
+        output += f"🔑 Роль: {result.get('role', 'N/A')}\n"
+        return output
+    else:
+        return f"❌ Ошибка: {result}"
+        
+        
+def get_my_doctor(session_state):
+    """Получение назначенного врача пациента."""
+    if not session_state.get("token"):
+        return "❌ Сначала войдите"
+
+    success, result = make_request("GET", "/users/doctor", token=session_state["token"])
+    if success and result:
+        return f"👨‍⚕️ Ваш врач: {result.get('full_name')} ({result.get('email')})"
+    else:
+        return "❌ Врач не назначен"
+
+
+# ===================== Врачебные функции =====================
+def get_my_patients(session_state):
+    """Список пациентов врача."""
+    if not session_state.get("token"):
+        return "❌ Сначала войдите"
+
+    success, result = make_request("GET", "/users/patients", token=session_state["token"])
+    if success:
+        if not result:
+            return "📭 У вас нет активных пациентов"
+        output = "👥 МОИ ПАЦИЕНТЫ:\n"
+        output += "=" * 40 + "\n"
+        for p in result:
+            output += f"🆔 {p['id']} | {p['full_name']} ({p['email']})\n"
+            output += f"   Телефон: {p.get('phone', 'N/A')}\n"
+            output += "-" * 30 + "\n"
         return output
     else:
         return f"❌ Ошибка: {result}"
 
 
-def delete_my_account(session_state):
-    """Удаление собственного аккаунта пользователем"""
+def get_patient_images(patient_id, session_state):
+    """Получить все изображения конкретного пациента (для врача)."""
     if not session_state.get("token"):
-        return "❌ Сначала войдите в систему", session_state
+        return "❌ Сначала войдите"
 
-    user_id = session_state.get("profile", {}).get("user_id")
-    if not user_id:
-        return "❌ Не удалось определить ID пользователя", session_state
+    if not patient_id:
+        return "❌ Введите ID пациента"
 
-    user_id_int = int(user_id)
-    success, result = make_request(
-        "DELETE",
-        f"/users/profile?user_id={user_id_int}",
-        token=session_state["token"]
-    )
+    success, result = make_request("GET", f"/predict/images/patient/{patient_id}",
+                                   token=session_state["token"])
     if success:
-        session_state.clear()
-        return "✅ Ваш аккаунт успешно удален. До свидания!", session_state
+        if not result:
+            return "📭 Нет изображений у пациента"
+        output = f"📷 ИЗОБРАЖЕНИЯ ПАЦИЕНТА {patient_id}:\n"
+        output += "=" * 40 + "\n"
+        for img in result:
+            output += f"🆔 {img['id']} | {img['upload_date'][:16]}\n"
+            output += f"   Площадь: {img.get('wound_area_percentage', 0)*100:.2f}%\n"
+            output += f"   Алерт: {'Да' if img.get('is_alert') else 'Нет'}\n"
+            output += "-" * 30 + "\n"
+        return output
     else:
-        error_msg = result
-        if isinstance(result, dict) and "detail" in result:
-            error_msg = result["detail"]
-        return f"❌ Ошибка при удалении аккаунта: {error_msg}", session_state
+        return f"❌ Ошибка: {result}"
 
 
-# Функции админа
-
-def get_all_users_admin(session_state):
-    """Просмотр всех пользователей через /api/admin/users"""
+def update_analysis(analysis_id, doctor_notes, recommendation, follow_up_days, session_state):
+    """Обновить анализ (добавить заметки, рекомендации)."""
     if not session_state.get("token"):
-        return "❌ Сначала войдите в систему"
+        return "❌ Сначала войдите"
+
+    if not analysis_id:
+        return "❌ Введите ID анализа"
+
+    data = {
+        "doctor_notes": doctor_notes or "",
+        "recommendation": recommendation or "",
+        "follow_up_days": follow_up_days or 0,
+        "is_reviewed": True
+    }
+    success, result = make_request("PATCH", f"/analyses/{analysis_id}",
+                                   token=session_state["token"], json_data=data)
+    if success:
+        return f"✅ Анализ {analysis_id} обновлён"
+    else:
+        return f"❌ Ошибка: {result}"
+
+
+def get_alerts(session_state, status=None, severity=None):
+    """Получение алертов для врача или пациента."""
+    if not session_state.get("token"):
+        return "❌ Сначала войдите"
+
+    params = {}
+    if status:
+        params["status"] = status
+    if severity:
+        params["severity"] = severity
+
+    success, result = make_request("GET", "/alerts", token=session_state["token"], params=params)
+    if success:
+        if not result:
+            return "📭 Нет алертов"
+        output = "🚨 АЛЕРТЫ:\n"
+        output += "=" * 50 + "\n"
+        for a in result:
+            output += f"🆔 {a['id']} | Пациент {a['patient_id']}\n"
+            output += f"   📊 {a['message']}\n"
+            output += f"   ⚠️ Серьёзность: {a['severity']} | Статус: {a['status']}\n"
+            output += f"   📅 {a['created_at'][:16]}\n"
+            output += "-" * 30 + "\n"
+        return output
+    else:
+        return f"❌ Ошибка: {result}"
+
+
+def resolve_alert(alert_id, session_state):
+    """Отметить алерт как решённый (врач)."""
+    if not session_state.get("token"):
+        return "❌ Сначала войдите"
+
+    if not alert_id:
+        return "❌ Введите ID алерта"
+
+    data = {"new_status": "resolved"}
+    success, result = make_request("PATCH", f"/alerts/{alert_id}/status",
+                                   token=session_state["token"], json_data=data)
+    if success:
+        return f"✅ Алерт {alert_id} отмечен как решённый"
+    else:
+        return f"❌ Ошибка: {result}"
+
+
+# ===================== Административные функции =====================
+def admin_list_users(session_state):
+    """Список всех пользователей (админ)."""
+    if not session_state.get("token"):
+        return "❌ Сначала войдите"
 
     success, result = make_request("GET", "/admin/users", token=session_state["token"])
-
     if success:
         if not result:
             return "📭 Нет пользователей"
-
         output = "👥 ВСЕ ПОЛЬЗОВАТЕЛИ:\n"
-        output += "=" * 70 + "\n"
-        for i, user in enumerate(result, 1):
-            output += f"{i}. ID: {user.get('user_id')}\n"
-            output += f"   👤 Имя: {user.get('username')}\n"
-            output += f"   📧 Email: {user.get('email')}\n"
-            output += f"   💰 Баланс: {user.get('balance')} кредитов\n"
-            output += f"   📊 Задач: {user.get('tasks_count', 0)}\n"
-            output += f"   📅 Создан: {user.get('created_at', 'N/A')[:10]}\n"
-            output += "-" * 50 + "\n"
-
+        output += "=" * 60 + "\n"
+        for u in result:
+            output += f"🆔 {u['id']} | {u['full_name']} ({u['email']})\n"
+            output += f"   Роль: {u['role']} | Активен: {u['is_active']}\n"
+            output += f"   📅 {u['created_at'][:16]}\n"
+            output += "-" * 40 + "\n"
         return output
     else:
         return f"❌ Ошибка: {result}"
 
 
-def admin_add_balance(user_id: int, amount: float, session_state):
-    """Пополнение баланса пользователя админом через /api/admin/users/{user_id}/balance"""
+def admin_assign_doctor(patient_id, doctor_id, session_state):
+    """Назначить врача пациенту (админ)."""
     if not session_state.get("token"):
-        return "❌ Сначала войдите в систему"
+        return "❌ Сначала войдите"
 
-    if amount <= 0:
-        return "❌ Сумма должна быть положительной"
+    if not patient_id or not doctor_id:
+        return "❌ Введите ID пациента и врача"
 
-    if not user_id or user_id <= 0:
-        return "❌ Введите корректный ID пользователя"
-
-    success, result = make_request("POST", f"/admin/users/{user_id}/balance", token=session_state["token"],
-                                   params={"amount": amount})
-
+    params = {"patient_id": patient_id, "doctor_id": doctor_id}
+    success, result = make_request("POST", "/admin/assign-doctor",
+                                   token=session_state["token"], params=params)
     if success:
-        return f"✅ УСПЕШНО!\nПользователь: {result.get('username')}\nСумма: +{amount} кредитов\nНовый баланс: {result.get('new_balance')} кредитов"
+        return f"✅ Врач {doctor_id} назначен пациенту {patient_id}"
     else:
         return f"❌ Ошибка: {result}"
 
 
-def moderate_deposit(user_id: int, amount: float, decision: str, session_state):
-    """Модерация пополнения через /api/admin/moderate-deposit"""
+def admin_get_audit_logs(session_state):
+    """Просмотр аудит-лога (админ)."""
     if not session_state.get("token"):
-        return "❌ Сначала войдите в систему"
+        return "❌ Сначала войдите"
 
-    if amount <= 0:
-        return "❌ Сумма должна быть положительной"
-
-    if not user_id or user_id <= 0:
-        return "❌ Введите корректный ID пользователя"
-
-    success, result = make_request("POST", "/admin/moderate-deposit", token=session_state["token"], params={
-        "user_id": user_id,
-        "amount": amount,
-        "decision": decision
-    })
-
-    if success:
-        status = result.get('status', 'unknown')
-        message = result.get('message', '')
-
-        if status == 'approved':
-            return f"✅ ОДОБРЕНО!\n{message}\nНовый баланс: {result.get('new_balance')} кредитов"
-        elif status == 'rejected':
-            return f"❌ ОТКЛОНЕНО!\n{message}"
-        else:
-            return f"ℹ️ {message}"
-    else:
-        return f"❌ Ошибка: {result}"
-
-
-def get_all_transactions_admin(session_state):
-    """Просмотр всех транзакций через /api/admin/transactions"""
-    if not session_state.get("token"):
-        return "❌ Сначала войдите в систему"
-
-    success, result = make_request("GET", "/admin/transactions", token=session_state["token"], params={"limit": 50})
-
+    success, result = make_request("GET", "/admin/audit-logs", token=session_state["token"])
     if success:
         if not result:
-            return "📭 Нет транзакций"
-
-        output = "💰 ВСЕ ТРАНЗАКЦИИ:\n"
-        output += "=" * 70 + "\n"
-        for i, t in enumerate(result, 1):
-            amount = t.get('amount')
-            sign = "+" if amount and amount > 0 else ""
-            output += f"{i}. ID транзакции: {t.get('transaction_id')}\n"
-            output += f"   👤 Пользователь: {t.get('username')} (ID: {t.get('user_id')})\n"
-            output += f"   💵 Сумма: {sign}{amount} кредитов\n"
-            output += f"   📅 Дата: {t.get('created_at', 'N/A')[:16]}\n"
-            output += "-" * 50 + "\n"
-
+            return "📭 Нет записей"
+        output = "📋 АУДИТ-ЛОГ:\n"
+        output += "=" * 60 + "\n"
+        for log in result[:30]:
+            output += f"🕐 {log['created_at'][:16]} | Пользователь {log['user_id']}\n"
+            output += f"   Действие: {log['action_type']} | Цель: {log['target_id']}\n"
+            if log['details']:
+                output += f"   Детали: {log['details'][:100]}\n"
+            output += "-" * 40 + "\n"
         return output
     else:
         return f"❌ Ошибка: {result}"
 
 
-def get_admin_history(session_state):
-    """Просмотр истории действий администратора через /api/admin/history"""
+def admin_delete_user(user_id, session_state):
+    """Удалить пользователя (админ)."""
     if not session_state.get("token"):
-        return "❌ Сначала войдите в систему"
+        return "❌ Сначала войдите"
 
-    success, result = make_request("GET", "/admin/history", token=session_state["token"])
+    if not user_id:
+        return "❌ Введите ID пользователя"
 
+    success, result = make_request("DELETE", f"/admin/users/{user_id}",
+                                   token=session_state["token"])
     if success:
-        history = result.get("history", [])
-
-        if not history:
-            return "📭 История действий пуста"
-
-        output = f"📋 ИСТОРИЯ ДЕЙСТВИЙ АДМИНА {result.get('username')}:\n"
-        output += "=" * 70 + "\n"
-
-        for i, action in enumerate(history[:30], 1):
-            timestamp = action.get('timestamp', '')[:16] if action.get('timestamp') else 'N/A'
-            output += f"{i}. 🕐 {timestamp}\n"
-            output += f"   👤 Пользователь ID: {action.get('user_id')}\n"
-            output += f"   💰 Сумма: +{action.get('amount')} кредитов\n"
-            if action.get('description'):
-                output += f"   📝 Описание: {action.get('description')}\n"
-            output += "-" * 50 + "\n"
-
-        return output
+        return f"✅ Пользователь {user_id} удалён"
     else:
         return f"❌ Ошибка: {result}"
 
 
-def admin_delete_user(user_id: float, session_state):
-    """Удаление пользователя администратором"""
-    if not session_state.get("token"):
-        return "❌ Сначала войдите в систему"
-
-    if not user_id or user_id <= 0:
-        return "❌ Введите корректный ID пользователя"
-
-    user_id_int = int(user_id)
-    success, result = make_request(
-        "DELETE",
-        f"/admin/users/{user_id_int}",
-        token=session_state["token"]
-    )
-
-    if success:
-        return f"✅ Пользователь ID {user_id_int} успешно удален администратором!"
-    else:
-        error_msg = result
-        if isinstance(result, dict) and "detail" in result:
-            error_msg = result["detail"]
-        return f"❌ Ошибка: {error_msg}"
-
-
-# Информация о пользователе
-user_info = gr.HTML("""
-<div style="text-align: center; padding: 10px; background-color: #f0f0f0; border-radius: 5px;">
-        <p>👤 Статус: Не авторизован</p>
-</div>
-""")
-
+# ===================== Обновление UI =====================
 def update_user_info(session_state):
     if session_state.get("profile"):
-        username = session_state["profile"].get("username", "Unknown")
-        is_admin = session_state.get("is_admin", False)
-        admin_badge = " 👑 (Администратор)" if is_admin else ""
+        name = session_state["profile"].get("full_name", "Unknown")
+        role = session_state.get("role", "patient")
+        admin_badge = " 👑 (Администратор)" if role == "admin" else ""
+        doctor_badge = " 🩺 (Врач)" if role == "doctor" else ""
         return f"""
         <div style="text-align: center; padding: 10px; background-color: #e3f2fd; border-radius: 5px;">
-            <p>👤 Пользователь: {username}{admin_badge}</p>
+            <p>👤 Пользователь: {name} {admin_badge}{doctor_badge}</p>
+            <p>Роль: {role}</p>
         </div>
         """
     else:
@@ -495,221 +469,159 @@ def update_user_info(session_state):
         </div>
         """
 
-def update_admin_visibility(session_state):
-    """Обновляет видимость админского контента"""
-    is_admin = session_state.get("is_admin", False)
-    print(f"👑 Updating admin visibility: {is_admin}")
+
+def update_role_based_visibility(session_state):
+    role = session_state.get("role", "patient")
+    is_admin = (role == "admin")
+    is_doctor = (role == "doctor")
+    is_patient = (role == "patient")
+
+    # Скрываем/показываем вкладки
     return [
-        gr.update(visible=is_admin),  # admin_content
-        gr.update(visible=not is_admin)  # non_admin_msg
+        gr.update(visible=is_patient),          # patient_tab
+        gr.update(visible=is_doctor),           # doctor_tab
+        gr.update(visible=is_admin)             # admin_tab
     ]
 
 
-# Интерфейс Gradio
-
+# ===================== Gradio Interface =====================
 custom_css = """
-.gradio-container {
-    max-width: 1400px !important;
-    margin: 20px auto !important;
-}
-.admin-badge {
-    background-color: #dc3545;
-    color: white;
-    padding: 2px 8px;
-    border-radius: 10px;
-    font-size: 12px;
-    margin-left: 10px;
-}
+.gradio-container { max-width: 1400px !important; margin: 20px auto !important; }
 """
 
 with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
     gr.Markdown("""
-    # 🤖 ML SERVICE INTERFACE
+    # 🩺 AI Мониторинг диабетической стопы
 
-    Сервис распознавания текста на изображениях с помощью EasyOCR
+    Система для сегментации и отслеживания ран.
     """)
 
-    # Состояние сессии
     session_state = gr.State({})
 
-    with gr.Tabs() as tabs:
-        # Первая вкладка - Авторизация
-        with gr.TabItem("🔐 Вход / Регистрация", id=0):
+    with gr.Tabs():
+        # =========== Вкладка 0: Авторизация ===========
+        with gr.TabItem("🔐 Вход / Регистрация"):
             with gr.Row():
                 with gr.Column():
-                    gr.Markdown("### Вход в систему")
+                    gr.Markdown("### Вход")
                     login_email = gr.Textbox(label="Email", placeholder="email@example.com")
                     login_pass = gr.Textbox(label="Пароль", type="password")
                     login_btn = gr.Button("Войти", variant="primary")
-
+                    logout_btn = gr.Button("🚪 Выйти", variant="stop")
+                    delete_account_btn = gr.Button("🗑️ Удалить аккаунт", variant="stop", visible=False)
                 with gr.Column():
-                    gr.Markdown("### Регистрация")
-                    reg_name = gr.Textbox(label="Имя пользователя", placeholder="username")
-                    reg_email = gr.Textbox(label="Email", placeholder="email@example.com")
+                    gr.Markdown("### Регистрация (пациент)")
+                    reg_email = gr.Textbox(label="Email")
+                    reg_name = gr.Textbox(label="Полное имя")
                     reg_pass = gr.Textbox(label="Пароль", type="password")
+                    reg_phone = gr.Textbox(label="Телефон", placeholder="+7 999 123-45-67")
                     reg_btn = gr.Button("Зарегистрироваться", variant="secondary")
-
-            logout_btn = gr.Button("🚪 Выйти", variant="stop")
             auth_output = gr.Textbox(label="Статус", lines=3)
 
-        # Вторая вкладка - Баланс
-        with gr.TabItem("💰 Баланс"):
+        # =========== Вкладка 1: Пациент ===========
+        with gr.TabItem("🧑‍⚕️ Пациент") as patient_tab:
+            with gr.Row():
+                with gr.Column(scale=1):
+                    gr.Markdown("### Загрузить изображение")
+                    image_input = gr.Image(type="pil", label="Выберите фото")
+                    notes_input = gr.Textbox(label="Заметки")
+                    upload_btn = gr.Button("📤 Загрузить", variant="primary")
+                    last_image_id = gr.Textbox(label="ID последнего изображения", interactive=False)
+                    upload_status = gr.Textbox(label="Статус", lines=2)
+
+                with gr.Column(scale=1):
+                    gr.Markdown("### Получить результат")
+                    img_id_input = gr.Number(label="ID изображения", precision=0)
+                    get_result_btn = gr.Button("📊 Получить результат")
+                    result_output = gr.Textbox(label="Результат", lines=12)
+
+            with gr.Row():
+                with gr.Column(scale=1):
+                    gr.Markdown("### Оверлей (маска)")
+                    with gr.Row():
+                        color_dropdown = gr.Dropdown(
+                            choices=["red", "green", "blue", "yellow", "cyan", "magenta", "white"],
+                            value="red", label="Цвет контура"
+                        )
+                        thickness_slider = gr.Slider(minimum=1, maximum=10, value=2, step=1, label="Толщина")
+                    show_area_check = gr.Checkbox(value=True, label="Показать площадь")
+                    get_overlay_btn = gr.Button("🖼️ Показать оверлей")
+                    overlay_image = gr.Image(type="pil", label="Оверлей")
+                    overlay_status = gr.Textbox(label="Статус", lines=1)
+
             with gr.Row():
                 with gr.Column():
-                    check_balance_btn = gr.Button("Проверить баланс")
-                    balance_output = gr.Textbox(label="Текущий баланс", lines=2)
-
+                    history_btn = gr.Button("📋 История моих загрузок")
+                    history_output = gr.Textbox(label="История", lines=10)
                 with gr.Column():
-                    topup_amount = gr.Number(label="Сумма пополнения", value=100, minimum=1)
-                    topup_btn = gr.Button("Пополнить", variant="primary")
+                    doctor_btn = gr.Button("👨‍⚕️ Мой врач")
+                    doctor_output = gr.Textbox(label="Информация о враче", lines=3)
 
-            check_balance_btn.click(get_balance, [session_state], [balance_output])
-            topup_btn.click(topup_balance, [topup_amount, session_state], [balance_output])
-
-        # Вкладка 3 - ML-запрос
-        with gr.TabItem("🔍 Распознать текст"):
+        # =========== Вкладка 2: Врач ===========
+        with gr.TabItem("🩺 Врач") as doctor_tab:
             with gr.Row():
                 with gr.Column():
-                    image_input = gr.Image(type="pil", label="Загрузите изображение")
-                    image_desc = gr.Textbox(label="Описание", placeholder="Опишите изображение")
-                    predict_btn = gr.Button("Отправить", variant="primary")
-
+                    patients_btn = gr.Button("👥 Мои пациенты")
+                    patients_output = gr.Textbox(label="Пациенты", lines=10)
                 with gr.Column():
-                    predict_output = gr.Textbox(label="Результат", lines=5)
-                    last_task_id = gr.Textbox(label="ID последней задачи", interactive=False)
+                    patient_id_input = gr.Number(label="ID пациента для просмотра", precision=0)
+                    patient_images_btn = gr.Button("📷 Показать изображения пациента")
+                    patient_images_output = gr.Textbox(label="Изображения", lines=10)
 
-            predict_btn.click(predict_image, [image_input, image_desc, session_state], [predict_output, last_task_id])
-
-        # Вкладка 4 - Результаты
-        with gr.TabItem("📋 Результаты"):
             with gr.Row():
                 with gr.Column():
-                    task_id_input = gr.Textbox(label="ID задачи", placeholder="Введите ID задачи")
-                    check_result_btn = gr.Button("Получить результат", variant="secondary")
+                    gr.Markdown("### Обновить анализ")
+                    analysis_id_input = gr.Number(label="ID анализа", precision=0)
+                    doctor_notes_input = gr.Textbox(label="Заметки врача", lines=3)
+                    recommendation_input = gr.Textbox(label="Рекомендация", lines=2)
+                    follow_up_input = gr.Number(label="Дней до следующего осмотра", precision=0)
+                    update_analysis_btn = gr.Button("💾 Сохранить изменения")
+                    update_analysis_output = gr.Textbox(label="Результат", lines=2)
 
+            with gr.Row():
                 with gr.Column():
-                    history_btn = gr.Button("История операций")
+                    alerts_btn = gr.Button("🚨 Мои алерты")
+                    alerts_output = gr.Textbox(label="Алерты", lines=10)
+                with gr.Column():
+                    alert_id_input = gr.Number(label="ID алерта для решения", precision=0)
+                    resolve_alert_btn = gr.Button("✅ Решить алерт")
+                    resolve_alert_output = gr.Textbox(label="Результат", lines=2)
 
-            result_output = gr.Textbox(label="Результат", lines=10)
+        # =========== Вкладка 3: Админ ===========
+        with gr.TabItem("👑 Админ") as admin_tab:
+            with gr.Row():
+                with gr.Column():
+                    users_list_btn = gr.Button("👥 Все пользователи")
+                    users_list_output = gr.Textbox(label="Пользователи", lines=12)
+                with gr.Column():
+                    audit_log_btn = gr.Button("📋 Аудит-лог")
+                    audit_log_output = gr.Textbox(label="Логи", lines=12)
 
-            check_result_btn.click(get_task_result, [task_id_input, session_state], [result_output])
-            history_btn.click(get_history, [session_state], [result_output])
-
-        # Вкладка 5 - Профиль
+            with gr.Row():
+                with gr.Column():
+                    gr.Markdown("### Назначить врача пациенту")
+                    assign_patient_id = gr.Number(label="ID пациента", precision=0)
+                    assign_doctor_id = gr.Number(label="ID врача", precision=0)
+                    assign_btn = gr.Button("📌 Назначить")
+                    assign_output = gr.Textbox(label="Результат", lines=2)
+                with gr.Column():
+                    gr.Markdown("### Удалить пользователя")
+                    del_user_id = gr.Number(label="ID пользователя", precision=0)
+                    del_user_btn = gr.Button("🗑️ Удалить", variant="stop")
+                    del_user_output = gr.Textbox(label="Результат", lines=2)
+        # =========== Вкладка 4: Профиль ===========
         with gr.TabItem("👤 Профиль"):
             profile_btn = gr.Button("👤 Показать профиль", variant="primary")
-            profile_output = gr.Textbox(label="Информация о профиле", lines=6)
-            with gr.Row():
-                with gr.Column():
-                    delete_account_btn = gr.Button(
-                        "🗑️ Удалить аккаунт",
-                        variant="stop",
-                        visible=False
-                    )
+            profile_output = gr.Textbox(label="Информация о профиле", lines=10)
 
-                    delete_account_output = gr.Textbox(label="Результат удаления", lines=2)
-
-            profile_btn.click(get_profile, [session_state], [profile_output])
-
-            # Удаление аккаунта
-            delete_account_btn.click(
-                delete_my_account,
-                [session_state],
-                [delete_account_output, session_state]
-            ).then(
-                update_user_info,
-                [session_state],
-                [user_info]
-            ).then(
-                lambda: gr.update(visible=False),
-                None,
-                delete_account_btn
-            )
-
-        # Вкладка 6 - Панель админа
-        with gr.TabItem("👑 Админ панель") as admin_tab:
-            # Контент для админов (скрыт по умолчанию)
-            admin_content = gr.Column(visible=False)
-
-            with admin_content:
-                with gr.Tabs():
-                    # Подвкладка 1: Все пользователи
-                    with gr.TabItem("👥 Все пользователи"):
-                        get_users_btn = gr.Button("📋 Показать всех пользователей", variant="primary")
-                        users_output = gr.Textbox(label="Список пользователей", lines=20)
-                        get_users_btn.click(get_all_users_admin, [session_state], [users_output])
-
-                    # Подвкладка 2: Пополнить баланс
-                    with gr.TabItem("💰 Пополнить баланс"):
-                        with gr.Row():
-                            with gr.Column():
-                                admin_user_id = gr.Number(label="ID пользователя", value=1, minimum=1)
-                                admin_amount = gr.Number(label="Сумма пополнения", value=100, minimum=1)
-                                admin_add_btn = gr.Button("✅ Пополнить", variant="primary")
-                            with gr.Column():
-                                admin_add_output = gr.Textbox(label="Результат", lines=6)
-                        admin_add_btn.click(admin_add_balance, [admin_user_id, admin_amount, session_state],
-                                            [admin_add_output])
-
-                    # Подвкладка 3: Все транзакции
-                    with gr.TabItem("📊 Все транзакции"):
-                        get_trans_btn = gr.Button("📋 Показать все транзакции", variant="primary")
-                        trans_output = gr.Textbox(label="Список транзакций", lines=20)
-                        get_trans_btn.click(get_all_transactions_admin, [session_state], [trans_output])
-
-                    # Подвкладка 4: История админа
-                    with gr.TabItem("📜 История действий"):
-                        get_admin_hist_btn = gr.Button("📋 Показать историю", variant="primary")
-                        admin_hist_output = gr.Textbox(label="История действий", lines=20)
-                        get_admin_hist_btn.click(get_admin_history, [session_state], [admin_hist_output])
-
-                   # Подвкладка 5: Удалить пользователя
-                    with gr.TabItem("🗑️ Удалить пользователя"):
-                        with gr.Row():
-                            with gr.Column():
-                                admin_delete_user_id = gr.Number(
-                                    label="ID пользователя для удаления",
-                                    value=1,
-                                    minimum=1
-                                )
-                                admin_delete_btn = gr.Button(
-                                    "🗑️ Удалить пользователя",
-                                    variant="stop"
-                                )
-                            with gr.Column():
-                                admin_delete_output = gr.Textbox(
-                                    label="Результат",
-                                    lines=4
-                                )
-
-                        admin_delete_btn.click(
-                            admin_delete_user,
-                            [admin_delete_user_id, session_state],
-                            [admin_delete_output]
-                        )
-
-                        gr.Markdown("""
-                        ⚠️ **Внимание!** Удаление пользователя необратимо.
-                        Все задачи и транзакции пользователя также будут удалены.
-                        Это действие может выполнить только администратор.
-                        """)
-
-            # Сообщение для не-админов (видно по умолчанию)
-            non_admin_msg = gr.Column(visible=True)
-            with non_admin_msg:
-                gr.Markdown("""
-                ### 🔒 Доступ ограничен
-                Эта вкладка доступна только администраторам.
-                """)
-
-    # Информация о пользователе
+    # === Информация о пользователе ===
     user_info = gr.HTML("""
     <div style="text-align: center; padding: 10px; background-color: #f0f0f0; border-radius: 5px;">
-         <p>👤 Статус: Не авторизован</p>
+        <p>👤 Статус: Не авторизован</p>
     </div>
     """)
 
-    # Кнопка входа
+    # === Обработчики событий ===
     login_btn.click(
         login,
         [login_email, login_pass, session_state],
@@ -719,12 +631,11 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
         [session_state],
         [user_info]
     ).then(
-        update_admin_visibility,
+        update_role_based_visibility,
         [session_state],
-        [admin_content, non_admin_msg]
+        [patient_tab, doctor_tab, admin_tab]
     )
 
-    # Кнопка выхода
     logout_btn.click(
         logout,
         [session_state],
@@ -734,33 +645,115 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
         [session_state],
         [user_info]
     ).then(
-        update_admin_visibility,
+        update_role_based_visibility,
         [session_state],
-        [admin_content, non_admin_msg]
+        [patient_tab, doctor_tab, admin_tab]
     )
 
-    # Кнопка регистрации
     reg_btn.click(
         register,
-        [reg_name, reg_email, reg_pass, session_state],
+        [reg_email, reg_name, reg_pass, reg_phone, session_state],
         [auth_output, session_state]
-    ).then(
-        update_user_info,
+    )
+
+    # Пациентские
+    upload_btn.click(
+        upload_wound_image,
+        [image_input, notes_input, session_state],
+        [upload_status, last_image_id]
+    )
+
+    get_result_btn.click(
+        get_result,
+        [img_id_input, session_state],
+        [result_output]
+    )
+
+    get_overlay_btn.click(
+        get_overlay,
+        [img_id_input, color_dropdown, thickness_slider, show_area_check, session_state],
+        [overlay_image, overlay_status]
+    )
+
+    history_btn.click(
+        get_patient_history,
         [session_state],
-        [user_info]
+        [history_output]
     )
 
+    doctor_btn.click(
+        get_my_doctor,
+        [session_state],
+        [doctor_output]
+    )
+
+    # Врачебные
+    patients_btn.click(
+        get_my_patients,
+        [session_state],
+        [patients_output]
+    )
+
+    patient_images_btn.click(
+        get_patient_images,
+        [patient_id_input, session_state],
+        [patient_images_output]
+    )
+
+    update_analysis_btn.click(
+        update_analysis,
+        [analysis_id_input, doctor_notes_input, recommendation_input, follow_up_input, session_state],
+        [update_analysis_output]
+    )
+
+    alerts_btn.click(
+        get_alerts,
+        [session_state],
+        [alerts_output]
+    )
+
+    resolve_alert_btn.click(
+        resolve_alert,
+        [alert_id_input, session_state],
+        [resolve_alert_output]
+    )
+
+    # Админские
+    users_list_btn.click(
+        admin_list_users,
+        [session_state],
+        [users_list_output]
+    )
+
+    audit_log_btn.click(
+        admin_get_audit_logs,
+        [session_state],
+        [audit_log_output]
+    )
+
+    assign_btn.click(
+        admin_assign_doctor,
+        [assign_patient_id, assign_doctor_id, session_state],
+        [assign_output]
+    )
+
+    del_user_btn.click(
+        admin_delete_user,
+        [del_user_id, session_state],
+        [del_user_output]
+    )
+
+    profile_btn.click(
+        get_profile,
+        [session_state],
+        [profile_output]
+    )
+
+    # При загрузке страницы — скрыть вкладки по умолчанию
     demo.load(
-        fn=update_admin_visibility,
-        inputs=[session_state],
-        outputs=[admin_content, non_admin_msg]
+        fn=lambda: [gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)],
+        outputs=[patient_tab, doctor_tab, admin_tab]
     )
-
 
 if __name__ == "__main__":
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
-        share=False,
-        show_error=True
-    )
+    demo.launch(server_name="0.0.0.0", server_port=7860, share=False, show_error=True)
