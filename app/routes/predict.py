@@ -16,6 +16,7 @@ import shutil
 import cv2
 import numpy as np
 from io import BytesIO
+import time
 
 logger = logging.getLogger(__name__)
 predict_router = APIRouter()
@@ -44,7 +45,7 @@ def upload_image(file: UploadFile = File(...),
     # Сохраняем файл
     upload_dir = "uploads"
     os.makedirs(upload_dir, exist_ok=True)
-    file_path = os.path.join(upload_dir, f"{current_user.id}_{file.filename}")
+    file_path = os.path.join(upload_dir, f"{current_user.id}_{int(time.time())}_{file.filename}")
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
@@ -211,3 +212,43 @@ def update_analysis_endpoint(
 ):
     analysis = update_analysis(analysis_id, update_data, session, current_user)
     return {"message": "Analysis updated"}
+
+
+@predict_router.get("/history/{patient_id}")
+def get_patient_history(
+    patient_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    # Проверка прав (врач или пациент)
+    if current_user.role == UserRole.PATIENT and current_user.id != patient_id:
+        raise HTTPException(403, "Access denied")
+    if current_user.role == UserRole.DOCTOR:
+        # проверяем, что врач привязан к пациенту
+        assignment = session.exec(
+            select(PatientDoctorAssignment)
+            .where(PatientDoctorAssignment.patient_id == patient_id)
+            .where(PatientDoctorAssignment.doctor_id == current_user.id)
+            .where(PatientDoctorAssignment.is_active == True)
+        ).first()
+        if not assignment:
+            raise HTTPException(403, "Not your patient")
+    
+    images = session.exec(
+        select(WoundImage)
+        .where(WoundImage.patient_id == patient_id)
+        .order_by(WoundImage.upload_date)
+    ).all()
+    
+    return [
+        {
+            "id": img.id,
+            "date": img.upload_date.isoformat(),
+            "area_percent": img.wound_area_percentage,
+            "area_change": img.area_change_percentage,
+            "alert": img.is_alert
+        }
+        for img in images
+    ]
+
+

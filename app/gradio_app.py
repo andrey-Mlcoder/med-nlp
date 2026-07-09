@@ -587,6 +587,21 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
                     resolve_alert_btn = gr.Button("✅ Решить алерт")
                     resolve_alert_output = gr.Textbox(label="Результат", lines=2)
 
+            with gr.Row():
+                with gr.Column():
+                    gr.Markdown("### Просмотр оверлея")
+                    overlay_id_input = gr.Number(label="ID изображения для оверлея", precision=0)
+                    color_dropdown = gr.Dropdown(
+                        choices=["red","green","blue","yellow","cyan","magenta","white"],
+                        value="red", label="Цвет контура"
+                    )
+                    thickness_slider = gr.Slider(minimum=1, maximum=10, value=2, step=1, label="Толщина")
+                    show_area_check = gr.Checkbox(value=True, label="Показать площадь")
+                    show_overlay_btn = gr.Button("🖼️ Показать оверлей")
+                with gr.Column():
+                    overlay_image_display = gr.Image(type="pil", label="Оверлей")
+                    overlay_status_display = gr.Textbox(label="Статус", lines=1)
+
         # =========== Вкладка 3: Админ ===========
         with gr.TabItem("👑 Админ") as admin_tab:
             with gr.Row():
@@ -747,6 +762,12 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
         get_profile,
         [session_state],
         [profile_output]
+    )
+
+    show_overlay_btn.click(
+        get_overlay, 
+        [overlay_id_input, color_dropdown, thickness_slider, show_area_check, session_state],
+        [overlay_image_display, overlay_status_display]
     )
 
     # При загрузке страницы — скрыть вкладки по умолчанию
